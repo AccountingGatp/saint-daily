@@ -282,9 +282,33 @@ function buildReportRows(reports) {
 }
 
 /**
- * Build Daily Report sheet (same as rnd/reporting.csv).
- * Uses combined sales+payments rows for sale-day metrics and payments for refunds.
- * COGS / merchant fees stay blank without supplier_costs / fees_inputs.
+ * Shopify-side COGS proxy used when supplier_costs / cogs.csv is not uploaded:
+ * (Net sales + Shipping charges) / 1.1  → ex-GST AUD.
+ * Matches the other 2-file reporting system (not true supplier COGS from cogs.js).
+ */
+function buildCogsByDateFromSales(salesRows) {
+  const map = new Map();
+  for (const row of salesRows) {
+    const day = isoDay(row["Day"]);
+    if (!day) continue;
+    map.set(
+      day,
+      (map.get(day) || 0) +
+        number(row["Net sales"]) +
+        number(row["Shipping charges"])
+    );
+  }
+  for (const [day, total] of map.entries()) {
+    map.set(day, round2(total / 1.1));
+  }
+  return map;
+}
+
+/**
+ * Build Daily Report sheet.
+ * Uses combined sales+payments for sale-day metrics and payments for refunds.
+ * COGS = sales proxy (net + shipping)/1.1 unless a real supplier map is passed later.
+ * Merchant fees stay blank without fees_inputs / fees.csv.
  */
 function buildDailyReportSheet(salesRows, combinedRows, paymentRows) {
   const salesByDay = groupByDay(salesRows);
@@ -292,6 +316,7 @@ function buildDailyReportSheet(salesRows, combinedRows, paymentRows) {
   const paymentsByDay = groupByDay(paymentRows);
   const dates = [...salesByDay.keys()].sort();
   const orderRanges = buildOrderRanges(salesByDay, dates);
+  const cogsByDate = buildCogsByDateFromSales(salesRows);
 
   const reports = dates.map((date) =>
     calculateDay(
@@ -299,8 +324,8 @@ function buildDailyReportSheet(salesRows, combinedRows, paymentRows) {
       combinedByDay.get(date) || [],
       paymentsByDay.get(date) || [],
       orderRanges.get(date),
-      null, // no cogs.csv in 2-file upload flow
-      undefined // no fees.csv
+      cogsByDate.has(date) ? cogsByDate.get(date) : null,
+      undefined // no fees.csv in 2-file upload flow
     )
   );
 
