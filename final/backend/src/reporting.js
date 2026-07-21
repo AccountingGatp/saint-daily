@@ -55,6 +55,9 @@ function numericOrderId(orderName) {
 function firstOrderRangeStart(orderIds) {
   const sorted = [...new Set(orderIds)].sort((a, b) => a - b);
   if (sorted.length === 0) return null;
+
+  // Historical returns can appear in a current sales day. The current order
+  // block is the final dense sequence after the last material numeric gap.
   let startIndex = 0;
   for (let i = 1; i < sorted.length; i++) {
     if (sorted[i] - sorted[i - 1] > 10) startIndex = i;
@@ -83,27 +86,18 @@ function buildOrderRanges(salesByDay, dates) {
   return result;
 }
 
-/** Shopify-side daily COGS proxy (net sales + shipping, ex GST). */
-function buildCogsByDateFromSales(salesRows) {
-  const map = new Map();
-  for (const row of salesRows) {
-    const day = isoDay(row["Day"]);
-    if (!day) continue;
-    if (!map.has(day)) map.set(day, 0);
-    map.set(
-      day,
-      map.get(day) + number(row["Net sales"]) + number(row["Shipping charges"])
-    );
-  }
-  for (const [day, total] of map.entries()) {
-    const aud = round2(total);
-    const gst = round2(aud / 11);
-    map.set(day, round2(aud - gst));
-  }
-  return map;
-}
-
-function calculateDay(date, salesRows, paymentRows, orderInfo, supplierCogs) {
+/**
+ * Same day metrics as rnd/reporting.js calculateDay.
+ * supplierCogs / feeInfo are optional (null when not provided).
+ */
+function calculateDay(
+  date,
+  salesRows,
+  paymentRows,
+  orderInfo,
+  supplierCogs,
+  feeInfo
+) {
   const grossSales = round2(sum(salesRows, "Gross sales"));
   const discounts = round2(sum(salesRows, "Discounts"));
   const returns = round2(sum(salesRows, "Sales reversals"));
@@ -156,8 +150,13 @@ function calculateDay(date, salesRows, paymentRows, orderInfo, supplierCogs) {
   const grossProfit =
     supplierCogs === null ? null : round2(totalRevenueExGst - supplierCogs);
 
+  const merchantFees = feeInfo?.hasFee ? feeInfo.fee : null;
+  const gstOnFee = feeInfo?.hasGst ? feeInfo.gst : null;
+
   const gstOnShipping = round2(shippingAuGross - shippingAuExGst);
   const gstOnRefundAu = round2(refundAuGross - refundAuGross / 1.1);
+
+  // AU product GST only (non-AU cancels: incl − ex = 0).
   const productInclGstBeforeReturns = salesRows.reduce((total, row) => {
     if (!row["Product title at time of sale"]) return total;
     return total + number(row["Gross sales"]) + number(row.Discounts);
@@ -165,9 +164,19 @@ function calculateDay(date, salesRows, paymentRows, orderInfo, supplierCogs) {
   const gstOnSalesProduct = round2(
     productInclGstBeforeReturns - productRevenueExGst
   );
+
+  // Sample: "GST on Sales Including Gst on refunds"
+  // = AU GST on product + AU GST on shipping + AU GST on refunds
+  // (= breakdown "Final GST Payable" + "Refund GST").
   const gstOnSalesIncludingRefunds = round2(
     gstOnSalesProduct + gstOnShipping + gstOnRefundAu
   );
+  const netGst =
+    gstOnFee === null
+      ? null
+      : round2(
+          gstOnSalesIncludingRefunds + gstOnShipping - gstOnFee - gstOnRefundAu
+        );
 
   return {
     date,
@@ -188,9 +197,12 @@ function calculateDay(date, salesRows, paymentRows, orderInfo, supplierCogs) {
     totalRevenueExGst,
     supplierCogs,
     grossProfit,
+    merchantFees,
     gstOnSalesIncludingRefunds,
     gstOnShipping,
+    gstOnFee,
     gstOnRefundAu,
+    netGst,
   };
 }
 
@@ -202,30 +214,19 @@ function blankRow(columnCount) {
   return Array(columnCount).fill("");
 }
 
-function buildDailyReportSheet(salesRows, combinedRows, paymentRows) {
-  const salesByDay = groupByDay(salesRows);
-  const combinedByDay = groupByDay(combinedRows);
-  const paymentsByDay = groupByDay(paymentRows);
-  const dates = [...salesByDay.keys()].sort();
-  const orderRanges = buildOrderRanges(salesByDay, dates);
-  const cogsByDate = buildCogsByDateFromSales(salesRows);
-
-  const reports = dates.map((date) =>
-    calculateDay(
-      date,
-      combinedByDay.get(date) || [],
-      paymentsByDay.get(date) || [],
-      orderRanges.get(date),
-      cogsByDate.get(date) ?? null
-    )
-  );
-
+/** Same layout as rnd/reporting.js buildReportRows. */
+function buildReportRows(reports) {
   const columns = reports.length + 1;
   return [
     ["Metric", ...reports.map(() => "Value")],
     metric("Date", reports, (r) => r.date, formatDisplayDate),
-    metric("Order range", reports, (r) => r.orderRange, (v) => v),
-    metric("Number of orders", reports, (r) => r.numberOfOrders, (v) => String(v)),
+    metric("Order range", reports, (r) => r.orderRange, (value) => value),
+    metric(
+      "Number of orders",
+      reports,
+      (r) => r.numberOfOrders,
+      (value) => String(value)
+    ),
     metric("Gross sales (A$)", reports, (r) => r.grossSales),
     metric("Discounts (A$)", reports, (r) => r.discounts),
     metric("Returns", reports, (r) => r.returns),
@@ -235,13 +236,23 @@ function buildDailyReportSheet(salesRows, combinedRows, paymentRows) {
     metric("Total sales (A$)", reports, (r) => r.totalSales),
     blankRow(columns),
     metric("Product revenue (ex GST, A$)", reports, (r) => r.productRevenueExGst),
-    metric("Shipping revenue (ex GST, A$) - AU", reports, (r) => r.shippingAuExGst),
+    metric(
+      "Shipping revenue (ex GST, A$) - AU",
+      reports,
+      (r) => r.shippingAuExGst
+    ),
     metric("Shipping Revenue - Others", reports, (r) => r.shippingOther),
     metric("Refund", reports, (r) => r.refund),
     metric("Refund Ex GST", reports, (r) => r.refundExGst),
     metric("Total revenue (ex GST, A$)", reports, (r) => r.totalRevenueExGst),
-    metric("COGS Supplier Cost Sheet - (A$)", reports, (r) => r.supplierCogs, formatMoney),
+    metric(
+      "COGS Supplier Cost Sheet - (A$)",
+      reports,
+      (r) => r.supplierCogs,
+      formatMoney
+    ),
     metric("Gross profit - COGS (A$)", reports, (r) => r.grossProfit),
+    metric("Merchant fees - total (A$)", reports, (r) => r.merchantFees),
     blankRow(columns),
     ["GST Calculation", ...reports.map(() => "")],
     ["Output", ...reports.map(() => "")],
@@ -253,14 +264,47 @@ function buildDailyReportSheet(salesRows, combinedRows, paymentRows) {
     ),
     metric("GST on Shipping ", reports, (r) => r.gstOnShipping, formatMoney),
     ["Input", ...reports.map(() => "")],
+    metric("GST on Fee ", reports, (r) => r.gstOnFee, formatMoney),
     metric(
       "GST on Refund- AU",
       reports,
       (r) => r.gstOnRefundAu,
-      (value) =>
-        value === null || !Number.isFinite(value) ? "" : formatNumber(value)
+      (value) => {
+        if (value === null || value === undefined || !Number.isFinite(value)) {
+          return "";
+        }
+        return formatNumber(value);
+      }
     ),
+    blankRow(columns),
+    metric("", reports, (r) => r.netGst, formatMoney),
   ];
+}
+
+/**
+ * Build Daily Report sheet (same as rnd/reporting.csv).
+ * Uses combined sales+payments rows for sale-day metrics and payments for refunds.
+ * COGS / merchant fees stay blank without supplier_costs / fees_inputs.
+ */
+function buildDailyReportSheet(salesRows, combinedRows, paymentRows) {
+  const salesByDay = groupByDay(salesRows);
+  const combinedByDay = groupByDay(combinedRows);
+  const paymentsByDay = groupByDay(paymentRows);
+  const dates = [...salesByDay.keys()].sort();
+  const orderRanges = buildOrderRanges(salesByDay, dates);
+
+  const reports = dates.map((date) =>
+    calculateDay(
+      date,
+      combinedByDay.get(date) || [],
+      paymentsByDay.get(date) || [],
+      orderRanges.get(date),
+      null, // no cogs.csv in 2-file upload flow
+      undefined // no fees.csv
+    )
+  );
+
+  return buildReportRows(reports);
 }
 
 module.exports = { buildDailyReportSheet };

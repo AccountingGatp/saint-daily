@@ -51,13 +51,17 @@ function round2(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
-function isoDay(d) {
+function isoDay(d, year = new Date().getFullYear()) {
   d = String(d || "").trim();
   let m = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
   m = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (m) {
     return `${m[3]}-${String(m[1]).padStart(2, "0")}-${String(m[2]).padStart(2, "0")}`;
+  }
+  m = d.match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (m) {
+    return `${year}-${String(m[1]).padStart(2, "0")}-${String(m[2]).padStart(2, "0")}`;
   }
   return d;
 }
