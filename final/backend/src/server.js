@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 4000;
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 80 * 1024 * 1024 },
-});
+}); 
 
 app.use(
   cors({
