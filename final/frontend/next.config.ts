@@ -1,8 +1,9 @@
 import type { NextConfig } from "next";
 
 const apiOrigin =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ||
-  "http://localhost:4000";
+"https://saint-daily-gatp-api.vercel.app"
+  // process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ||
+  // "http://localhost:4000";
 
 const nextConfig: NextConfig = {
   async rewrites() {
