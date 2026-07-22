@@ -49,7 +49,10 @@ export default function Home() {
       form.append("sales", sales);
       form.append("payments", payments);
 
-      const res = await fetch("/api/report", {
+      const apiBase = (
+        process.env.NEXT_PUBLIC_API_URL || ""
+      ).replace(/\/$/, "");
+      const res = await fetch(`${apiBase}/api/report`, {
         method: "POST",
         body: form,
       });

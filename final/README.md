@@ -36,3 +36,20 @@ Open http://localhost:3000, upload:
 Then click **Generate report**. The browser downloads an `.xlsx`.
 
 Uploads stay in memory on the server and are not written to disk.
+
+## Vercel (two projects)
+
+Deploy **backend** and **frontend** as separate Vercel projects from the same repo.
+
+### 1. Backend
+- Root Directory: `final/backend`
+- Framework: Other
+- Uses `vercel.json` → Express on `@vercel/node`
+
+### 2. Frontend
+- Root Directory: `final/frontend`
+- Framework: Next.js
+- Env var:
+  - `NEXT_PUBLIC_API_URL` = your backend URL (e.g. `https://saint-daily-api.vercel.app`) — no trailing slash
+
+Locally, leave `NEXT_PUBLIC_API_URL` unset; the Next rewrite proxies `/api` → `http://localhost:4000`.

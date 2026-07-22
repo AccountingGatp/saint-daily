@@ -12,17 +12,9 @@ const upload = multer({
   limits: { fileSize: 80 * 1024 * 1024 },
 });
 
-const allowedOrigins = (
-  process.env.CORS_ORIGINS ||
-  "http://localhost:3000,http://127.0.0.1:3000"
-)
-  .split(",")
-  .map((o) => o.trim())
-  .filter(Boolean);
-
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: true,
     exposedHeaders: ["Content-Disposition"],
   })
 );
