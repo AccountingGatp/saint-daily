@@ -1,7 +1,18 @@
+// Load .env for local dev; harmless (and skipped) if dotenv isn't installed.
+try {
+  require("dotenv").config();
+} catch {}
+
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const { buildWorkbook } = require("./process");
+const {
+  makeKey,
+  presignPut,
+  getObjectBuffer,
+  assertDailyKey,
+} = require("./b2");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -10,7 +21,7 @@ const PORT = process.env.PORT || 4000;
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 80 * 1024 * 1024 },
-}); 
+});
 
 app.use(
   cors({
@@ -18,16 +29,45 @@ app.use(
     exposedHeaders: ["Content-Disposition"],
   })
 );
+app.use(express.json());
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
 /**
+ * POST /api/upload-url
+ * body: { salesName?, paymentsName? }
+ * Returns presigned PUT URLs so the browser uploads CSVs straight to B2,
+ * bypassing the serverless request-body size limit.
+ */
+app.post("/api/upload-url", async (req, res) => {
+  try {
+    const { salesName, paymentsName } = req.body || {};
+    const salesKey = makeKey("sales", salesName);
+    const paymentsKey = makeKey("payments", paymentsName);
+
+    const [salesUrl, paymentsUrl] = await Promise.all([
+      presignPut(salesKey),
+      presignPut(paymentsKey),
+    ]);
+
+    res.json({
+      sales: { key: salesKey, url: salesUrl },
+      payments: { key: paymentsKey, url: paymentsUrl },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message || "Failed to sign upload URLs" });
+  }
+});
+
+/**
  * POST /api/report
- * multipart fields:
- *   sales    - Total sales by order CSV
- *   payments - Net payments by order CSV
+ * Preferred (B2): JSON body { salesKey, paymentsKey } — files already uploaded
+ *   to Backblaze via the presigned URLs from /api/upload-url. Backend downloads
+ *   them server-side, so there is no request-body size limit.
+ * Fallback (small files): multipart fields `sales` and `payments`.
  * Returns an .xlsx with sheets: Daily Report, COGS, Country Wise, Breakdown
  */
 app.post(
@@ -38,17 +78,31 @@ app.post(
   ]),
   async (req, res) => {
     try {
-      const salesFile = req.files?.sales?.[0];
-      const paymentsFile = req.files?.payments?.[0];
+      const { salesKey, paymentsKey } = req.body || {};
+      let salesBuffer;
+      let paymentsBuffer;
 
-      if (!salesFile || !paymentsFile) {
-        return res.status(400).json({
-          error:
-            "Upload both files: 'sales' (Total sales by order) and 'payments' (Net payments by order)",
-        });
+      if (salesKey && paymentsKey) {
+        assertDailyKey(salesKey);
+        assertDailyKey(paymentsKey);
+        [salesBuffer, paymentsBuffer] = await Promise.all([
+          getObjectBuffer(salesKey),
+          getObjectBuffer(paymentsKey),
+        ]);
+      } else {
+        const salesFile = req.files?.sales?.[0];
+        const paymentsFile = req.files?.payments?.[0];
+        if (!salesFile || !paymentsFile) {
+          return res.status(400).json({
+            error:
+              "Provide { salesKey, paymentsKey } from /api/upload-url, or upload both 'sales' and 'payments' files.",
+          });
+        }
+        salesBuffer = salesFile.buffer;
+        paymentsBuffer = paymentsFile.buffer;
       }
 
-      const buffer = await buildWorkbook(salesFile.buffer, paymentsFile.buffer);
+      const buffer = await buildWorkbook(salesBuffer, paymentsBuffer);
       const filename = `daily-report-${new Date().toISOString().slice(0, 10)}.xlsx`;
 
       res.setHeader(

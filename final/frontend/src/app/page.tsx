@@ -16,6 +16,18 @@ import { Label } from "@/components/ui/label";
 
 type FileSlot = "sales" | "payments";
 
+/** PUT a file directly to Backblaze B2 using a presigned URL. */
+async function putToB2(url: string, file: File) {
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "text/csv" },
+    body: file,
+  });
+  if (!res.ok) {
+    throw new Error(`Upload to storage failed (${res.status})`);
+  }
+}
+
 export default function Home() {
   const [sales, setSales] = useState<File | null>(null);
   const [payments, setPayments] = useState<File | null>(null);
@@ -45,16 +57,39 @@ export default function Home() {
 
     setLoading(true);
     try {
-      const form = new FormData();
-      form.append("sales", sales);
-      form.append("payments", payments);
-
       const apiBase = (
-        process.env.NEXT_PUBLIC_API_URL || ""
+        process.env.NEXT_PUBLIC_API_URL || "https://saint-daily-gatp-api.vercel.app"
       ).replace(/\/$/, "");
+
+      // 1. Ask the backend for presigned B2 upload URLs.
+      const signRes = await fetch(`${apiBase}/api/upload-url`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          salesName: sales.name,
+          paymentsName: payments.name,
+        }),
+      });
+      if (!signRes.ok) {
+        const data = await signRes.json().catch(() => null);
+        throw new Error(data?.error || `Could not sign upload (${signRes.status})`);
+      }
+      const signed = await signRes.json();
+
+      // 2. Upload each CSV straight to Backblaze B2.
+      await Promise.all([
+        putToB2(signed.sales.url, sales),
+        putToB2(signed.payments.url, payments),
+      ]);
+
+      // 3. Ask the backend to build the report from the uploaded objects.
       const res = await fetch(`${apiBase}/api/report`, {
         method: "POST",
-        body: form,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          salesKey: signed.sales.key,
+          paymentsKey: signed.payments.key,
+        }),
       });
 
       if (!res.ok) {
